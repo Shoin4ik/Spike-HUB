@@ -1,0 +1,339 @@
+local RS = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local lp = Players.LocalPlayer
+local Net = RS:WaitForChild("Modules", 15):WaitForChild("Net", 15)
+local Atk = Net:WaitForChild("RE/RegisterAttack", 15)
+local Hit = Net:WaitForChild("RE/RegisterHit", 15)
+local CommF = RS:WaitForChild("Remotes", 15):WaitForChild("CommF_", 15)
+
+local token = tostring(lp.UserId):sub(2, 4) .. tostring(math.random(10000, 99999))
+pcall(function() Hit:FireServer(token) end)
+
+local Cfg = {
+    On = false, Radius = 250, Format = "Pairs", Bring = false, GatherRadius = 300,
+
+    Farm = false, Quest = false, FarmRadius = 1500, Height = 10, Speed = 150,
+    Weapon = "Melee", NoClip = true, Batch = 30,
+}
+local center = nil
+local questMob = nil
+local Window
+
+local function active() return Cfg.Farm or Cfg.Quest end
+local function getRoot()
+    local char = lp.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+local function notify(t, c)
+    if Window then pcall(function() Window:Notify({ Title = t, Content = c }) end) end
+end
+
+local function mobMatch(mob)
+    if Cfg.Quest and not Cfg.Farm and questMob then return mob.Name == questMob end
+    return true
+end
+
+local function targets()
+    local list = {}
+    local root = getRoot()
+    local folder = workspace:FindFirstChild("Enemies")
+    if not (root and folder) then return list end
+    for _, mob in ipairs(folder:GetChildren()) do
+        local hum = mob:FindFirstChildOfClass("Humanoid")
+        local head = mob:FindFirstChild("Head") or mob:FindFirstChild("HumanoidRootPart")
+        if hum and hum.Health > 0 and head and (head.Position - root.Position).Magnitude <= Cfg.Radius then
+            table.insert(list, { mob = mob, head = head })
+            if #list >= 30 then break end
+        end
+    end
+    return list
+end
+
+local function fireAura()
+    local list = targets()
+    if #list == 0 then return end
+    local n = math.max(1, Cfg.Batch)
+    for i = 1, #list, n do
+        local chunk = {}
+        for j = i, math.min(i + n - 1, #list) do
+            if Cfg.Format == "Pairs" then
+                chunk[#chunk + 1] = { list[j].mob, list[j].head }
+            else
+                chunk[#chunk + 1] = list[j].mob
+            end
+        end
+        Atk:FireServer(0)
+        Hit:FireServer(list[i].head, chunk, nil, token)
+    end
+end
+
+-- AoE Kill Aura (also active while any auto farm is on)
+task.spawn(function()
+    while true do
+        task.wait(0.15)
+        if Cfg.On or active() then
+            pcall(fireAura)
+        end
+    end
+end)
+
+-- Bring Mobs (also active while farming)
+task.spawn(function()
+    local lastSim = 0
+    while true do
+        task.wait(0.2)
+        if Cfg.Bring or active() then
+            pcall(function()
+                local root = getRoot()
+                local folder = workspace:FindFirstChild("Enemies")
+                if not (root and folder) then return end
+                if os.clock() - lastSim > 2 then
+                    lastSim = os.clock()
+                    if sethiddenproperty then pcall(sethiddenproperty, lp, "SimulationRadius", 1e9) end
+                end
+                local farming = active()
+                local pos
+                if farming and center then
+                    pos = center
+                else
+                    pos = (root.CFrame * CFrame.new(0, 0, -8)).Position
+                end
+                local radius = Cfg.GatherRadius
+                if farming then
+                    local flat = Vector3.new(root.Position.X - pos.X, 0, root.Position.Z - pos.Z)
+                    if flat.Magnitude > 40 then return end
+                end
+                local point = CFrame.new(pos)
+                local n = 0
+                for _, mob in ipairs(folder:GetChildren()) do
+                    local hum = mob:FindFirstChildOfClass("Humanoid")
+                    local mroot = mob:FindFirstChild("HumanoidRootPart")
+                    if hum and hum.Health > 0 and mroot and (not farming or mobMatch(mob))
+                        and (mroot.Position - root.Position).Magnitude <= radius then
+                        if (mroot.Position - pos).Magnitude > 3 then
+                            mroot.CFrame = point
+                            mroot.AssemblyLinearVelocity = Vector3.zero
+                        end
+                        n += 1
+                        if n >= 40 then break end
+                    end
+                end
+            end)
+        end
+    end
+end)
+
+local function aliveNear(c, r, filter)
+    local folder = workspace:FindFirstChild("Enemies")
+    if not folder then return false end
+    for _, mob in ipairs(folder:GetChildren()) do
+        local hum = mob:FindFirstChildOfClass("Humanoid")
+        local mr = mob:FindFirstChild("HumanoidRootPart")
+        if hum and hum.Health > 0 and mr and (not filter or mob.Name == filter)
+            and (mr.Position - c).Magnitude <= r then return true end
+    end
+    return false
+end
+
+-- Auto Farm Nearest: choose pile centre
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+        if Cfg.Farm then
+            pcall(function()
+                local root = getRoot()
+                local folder = workspace:FindFirstChild("Enemies")
+                if not (root and folder) then return end
+                if center and aliveNear(center, 40) then return end
+                local best, bd = nil, Cfg.FarmRadius
+                for _, mob in ipairs(folder:GetChildren()) do
+                    local hum = mob:FindFirstChildOfClass("Humanoid")
+                    local mr = mob:FindFirstChild("HumanoidRootPart")
+                    if hum and hum.Health > 0 and mr then
+                        local d = (mr.Position - root.Position).Magnitude
+                        if d < bd then bd, best = d, mr end
+                    end
+                end
+                center = best and best.Position or nil
+            end)
+        elseif not Cfg.Quest then
+            center = nil
+        end
+    end
+end)
+
+-- Auto Farm Level (quests)
+local Quests
+pcall(function() Quests = require(RS:WaitForChild("Quests", 15)) end)
+
+local function spawnFor(mob)
+    local ok, res = pcall(function()
+        local f = workspace:FindFirstChild("_WorldOrigin")
+        f = f and f:FindFirstChild("EnemySpawns")
+        if not f then return nil end
+        for _, s in ipairs(f:GetChildren()) do
+            if s.Name:find(mob, 1, true) then return s end
+        end
+    end)
+    return ok and res or nil
+end
+
+-- sea by PlaceId, level range of the sea
+local function seaRange()
+    local pid = game.PlaceId
+    if pid == 2753915549 then return 0, 699 end
+    if pid == 4442272183 then return 700, 1499 end
+    return 1500, math.huge
+end
+
+local function pickQuest()
+    if not Quests then return nil end
+    local lvl = lp:FindFirstChild("Data") and lp.Data:FindFirstChild("Level") and lp.Data.Level.Value or 1
+    local lo, hi = seaRange()
+    local best
+    for key, levels in pairs(Quests) do
+        if type(levels) == "table" then
+            for idx, q in pairs(levels) do
+                if type(q) == "table" and type(q.Task) == "table" and q.LevelReq
+                    and q.LevelReq <= lvl and q.LevelReq >= lo and q.LevelReq <= hi then
+                    local mob, cnt = next(q.Task)
+                    if mob and type(cnt) == "number" and cnt > 1 then
+                        if not best or q.LevelReq > best.req then
+                            best = { key = key, idx = idx, mob = mob, req = q.LevelReq }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function questTracked()
+    local ok, vis = pcall(function()
+        return lp.PlayerGui.Main.Quest.Visible
+    end)
+    return ok and vis
+end
+
+task.spawn(function()
+    local quest, lastPick, lastAccept, warned = nil, 0, 0, false
+    while true do
+        task.wait(0.5)
+        if Cfg.Quest and not Cfg.Farm then
+            pcall(function()
+                local root = getRoot()
+                local folder = workspace:FindFirstChild("Enemies")
+                if not (root and folder) then return end
+                if not quest or os.clock() - lastPick > 30 then
+                    lastPick = os.clock()
+                    quest = pickQuest()
+                end
+                if not quest then
+                    if not warned then warned = true notify("Auto Farm Level", "No suitable quest found for your level.") end
+                    center = nil
+                    questMob = nil
+                    return
+                end
+                warned = false
+                questMob = quest.mob
+                if not questTracked() and os.clock() - lastAccept > 10 then
+                    lastAccept = os.clock()
+                    CommF:InvokeServer("StartQuest", quest.key, quest.idx)
+                end
+                if center and aliveNear(center, 40, quest.mob) then return end
+                local best, bd = nil, math.huge
+                for _, mob in ipairs(folder:GetChildren()) do
+                    local hum = mob:FindFirstChildOfClass("Humanoid")
+                    local mr = mob:FindFirstChild("HumanoidRootPart")
+                    if mob.Name == quest.mob and hum and hum.Health > 0 and mr then
+                        local d = (mr.Position - root.Position).Magnitude
+                        if d < bd then bd, best = d, mr end
+                    end
+                end
+                if best then
+                    center = best.Position
+                else
+                    local s = spawnFor(quest.mob)
+                    center = s and s.Position or nil
+                end
+            end)
+        elseif not Cfg.Quest then
+            questMob = nil
+        end
+    end
+end)
+
+-- auto equip chosen weapon type
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if active() then
+            pcall(function()
+                local char = lp.Character
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if not hum or char:FindFirstChildOfClass("Tool") then return end
+                for _, t in ipairs(lp.Backpack:GetChildren()) do
+                    if t:IsA("Tool") and t.ToolTip == Cfg.Weapon then hum:EquipTool(t) return end
+                end
+            end)
+        end
+    end
+end)
+
+-- flight (smooth, constant speed) above the pile
+RunService.Heartbeat:Connect(function(dt)
+    if not (active() and center) then return end
+    local root = getRoot()
+    if not root then return end
+    local goal = center + Vector3.new(0, Cfg.Height, 0)
+    local diff = goal - root.Position
+    local dist = diff.Magnitude
+    local step = Cfg.Speed * dt
+    local newPos = dist <= step and goal or root.Position + diff.Unit * step
+    root.CFrame = CFrame.lookAt(newPos, newPos - Vector3.new(0, 1, 0) + Vector3.new(0, 0, 0.001))
+    root.AssemblyLinearVelocity = Vector3.zero
+end)
+
+-- noclip while farming
+local lastClip = 0
+RunService.Stepped:Connect(function()
+    if not (active() and Cfg.NoClip) then return end
+    if os.clock() - lastClip < 0.25 then return end
+    lastClip = os.clock()
+    local char = lp.Character
+    if not char then return end
+    for _, p in ipairs(char:GetDescendants()) do
+        if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end
+    end
+end)
+
+local UI = loadstring(game:HttpGet("https://api.luamancer.com/ui/v1.lua"))()
+Window = UI:CreateWindow({ Title = "AoE Aura", Subtitle = "Blox Fruits", Theme = "Midnight", Logo = "swords" })
+
+local farmTab = Window:AddTab({ Name = "Farm", Icon = "sword" })
+local fsec = farmTab:AddSection("Auto Farm")
+fsec:AddToggle({ Title = "Auto Farm Level", Description = "Takes the quest for your level and kills its mobs", Icon = "star", Default = false, Callback = function(on)
+    Cfg.Quest = on
+    if not on and not Cfg.Farm then center = nil end
+end })
+fsec:AddToggle({ Title = "Auto Farm Nearest", Icon = "play", Default = false, Callback = function(on)
+    Cfg.Farm = on
+    if not on and not Cfg.Quest then center = nil end
+end })
+fsec:AddSlider({ Title = "Farm Radius", Icon = "map-pin", Min = 100, Max = 3000, Default = 1500, Step = 50, Suffix = " studs", Callback = function(v) Cfg.FarmRadius = v end })
+fsec:AddSlider({ Title = "Fly Height", Icon = "rocket", Min = 5, Max = 30, Default = 10, Step = 1, Suffix = " studs", Callback = function(v) Cfg.Height = v end })
+fsec:AddSlider({ Title = "Fly Speed", Icon = "zap", Min = 50, Max = 300, Default = 150, Step = 10, Suffix = " studs/s", Callback = function(v) Cfg.Speed = v end })
+fsec:AddDropdown({ Title = "Attack With", Icon = "swords", Options = { "Melee", "Sword", "Gun", "Blox Fruit" }, Default = "Melee", Callback = function(o) Cfg.Weapon = o end })
+fsec:AddToggle({ Title = "NoClip While Farming", Icon = "eye", Default = true, Callback = function(on) Cfg.NoClip = on end })
+
+local tab = Window:AddTab({ Name = "Combat", Icon = "swords" })
+local sec = tab:AddSection("Kill Aura")
+sec:AddToggle({ Title = "AoE Kill Aura", Icon = "zap", Default = false, Callback = function(on) Cfg.On = on end })
+sec:AddSlider({ Title = "Aura Radius", Icon = "crosshair", Min = 30, Max = 500, Default = 250, Step = 10, Suffix = " studs", Callback = function(v) Cfg.Radius = v end })
+sec:AddSlider({ Title = "Targets Per Hit", Icon = "swords", Min = 1, Max = 30, Default = 30, Step = 1, Suffix = " mobs", Callback = function(v) Cfg.Batch = v end })
+sec:AddToggle({ Title = "Bring Mobs", Icon = "crosshair", Default = false, Callback = function(on) Cfg.Bring = on end })
+sec:AddSlider({ Title = "Gather Radius", Icon = "map-pin", Min = 60, Max = 1000, Default = 300, Step = 20, Suffix = " studs", Callback = function(v) Cfg.GatherRadius = v end })
+sec:AddDropdown({ Title = "List Format", Icon = "settings", Options = { "Pairs", "Models" }, Default = "Pairs", Callback = function(o) Cfg.Format = o end })
+sec:AddButton({ Title = "Unload", Icon = "x", Callback = function() Cfg.On = false Cfg.Farm = false Cfg.Quest = false center = nil Window:Destroy() end })
